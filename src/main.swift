@@ -73,6 +73,7 @@ func symbolName(for volume: Int) -> String {
 
 class VolumeBarView: NSView {
     var onScroll: ((Int, Bool) -> Void)?
+    var onLeftClick: ((NSEvent) -> Void)?
     var onRightClick: ((NSEvent) -> Void)?
     var onResize: ((CGFloat) -> Void)?
 
@@ -134,6 +135,7 @@ class VolumeBarView: NSView {
     }
 
     override func rightMouseDown(with event: NSEvent) { onRightClick?(event) }
+    override func mouseDown(with event: NSEvent) { onLeftClick?(event) }
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
@@ -144,6 +146,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var barView: VolumeBarView!
     private let step = 5
+    private var stepsReducer = 30
+    private weak var leftMenuReducerItem: NSMenuItem?
 
     /// Optimistic cache — updated instantly on scroll so the UI never waits for a read.
     private var cachedVolume = 50
@@ -151,6 +155,58 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var pendingRefresh: DispatchWorkItem?
     /// Tracks which device we're already listening to, to avoid duplicate listeners.
     private var observedDeviceID: AudioDeviceID = 0
+
+    @objc private func stepsReducerChanged(_ sender: NSSlider) {
+        stepsReducer = Int(sender.doubleValue.rounded())
+        leftMenuReducerItem?.title = "Trackpad Step Reducer: \(stepsReducer)"
+    }
+
+    private func showLeftMenu(with event: NSEvent) {
+        let menu = NSMenu()
+        let current = NSMenuItem(title: "Current Volume: \(cachedVolume)%",
+                                 action: nil, keyEquivalent: "")
+                                 
+        menu.addItem(current)
+
+        let reducerItem = NSMenuItem(title: "Trackpad Step Reducer: \(stepsReducer)",
+                                     action: nil, keyEquivalent: "")
+        reducerItem.isEnabled = true
+        menu.addItem(reducerItem)
+        leftMenuReducerItem = reducerItem
+
+        let slider = NSSlider(value: Double(stepsReducer),
+                      minValue: 0,
+                      maxValue: 100,
+                      target: self,
+                      action: #selector(stepsReducerChanged(_:)))
+        slider.numberOfTickMarks = 11
+        slider.allowsTickMarkValuesOnly = false
+
+        let sliderContainer = NSView(frame: NSRect(x: 0, y: 0, width: 196, height: 24))
+        slider.frame = NSRect(x: 16, y: 0, width: 170, height: 24)
+        sliderContainer.addSubview(slider)
+
+        let sliderItem = NSMenuItem()
+        sliderItem.view = sliderContainer
+        menu.addItem(sliderItem)
+
+        menu.addItem(.separator())
+
+        let quit = NSMenuItem(title: "Quit VolumeScroll",
+                              action: #selector(self.quit), keyEquivalent: "")
+        quit.target = self
+        menu.addItem(quit)
+        NSMenu.popUpContextMenu(menu, with: event, for: self.barView)
+    }
+
+    private func showMenu(with event: NSEvent) {
+        let menu = NSMenu()
+        let quit = NSMenuItem(title: "Quit VolumeScroll",
+                              action: #selector(self.quit), keyEquivalent: "")
+        quit.target = self
+        menu.addItem(quit)
+        NSMenu.popUpContextMenu(menu, with: event, for: self.barView)
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -165,8 +221,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             var newVol = self.cachedVolume
 
             if (isTouchPad) {
-                let stepsReducer = 15
-                newVol = max(0, min(100, self.cachedVolume + ((steps * self.step) * stepsReducer / 100)))
+                newVol = max(0, min(100, self.cachedVolume + ((steps * self.step) * self.stepsReducer / 100)))
             } else {
                 newVol = max(0, min(100, self.cachedVolume + steps * self.step))
             }
@@ -176,14 +231,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self.barView.update(volume: newVol)
         }
 
+        barView.onLeftClick = { [weak self] event in
+            self?.showLeftMenu(with: event)
+        }
+
         barView.onRightClick = { [weak self] event in
-            guard let self else { return }
-            let menu = NSMenu()
-            let quit = NSMenuItem(title: "Quit VolumeScroll",
-                                  action: #selector(self.quit), keyEquivalent: "")
-            quit.target = self
-            menu.addItem(quit)
-            NSMenu.popUpContextMenu(menu, with: event, for: self.barView)
+            self?.showMenu(with: event)
         }
 
         barView.onResize = { [weak self] w in
