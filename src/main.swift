@@ -60,6 +60,31 @@ func setVolume(_ volume: Int) {
     AudioObjectSetPropertyData(dev, &addr, 0, nil, size, &vol)
 }
 
+func isMuted() -> Bool {
+    let dev = defaultOutputDevice()
+
+    var muted    = UInt32(0)
+    var muteSize = UInt32(MemoryLayout<UInt32>.size)
+    var muteAddr = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyMute,
+        mScope:    kAudioDevicePropertyScopeOutput,
+        mElement:  kAudioObjectPropertyElementMain
+    )
+    return AudioObjectGetPropertyData(dev, &muteAddr, 0, nil, &muteSize, &muted) == noErr && muted != 0
+}
+
+func setMuted(_ muted: Bool) {
+    let dev = defaultOutputDevice()
+    var mutedValue = UInt32(muted ? 1 : 0)
+    let size = UInt32(MemoryLayout<UInt32>.size)
+    var muteAddr = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyMute,
+        mScope:    kAudioDevicePropertyScopeOutput,
+        mElement:  kAudioObjectPropertyElementMain
+    )
+    AudioObjectSetPropertyData(dev, &muteAddr, 0, nil, size, &mutedValue)
+}
+
 func symbolName(for volume: Int) -> String {
     switch volume {
     case 0:       return "speaker.slash.fill"
@@ -74,7 +99,6 @@ func symbolName(for volume: Int) -> String {
 class VolumeBarView: NSView {
     var onScroll: ((Int, Bool) -> Void)?
     var onLeftClick: ((NSEvent) -> Void)?
-    var onRightClick: ((NSEvent) -> Void)?
     var onResize: ((CGFloat) -> Void)?
 
     private let iconView = NSImageView()
@@ -134,7 +158,6 @@ class VolumeBarView: NSView {
         }
     }
 
-    override func rightMouseDown(with event: NSEvent) { onRightClick?(event) }
     override func mouseDown(with event: NSEvent) { onLeftClick?(event) }
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -146,8 +169,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var barView: VolumeBarView!
     private let step = 5
-    private var stepsReducer = 30
-    private weak var leftMenuReducerItem: NSMenuItem?
+    private let sensitivityValues = [22, 33, 44]
+    private let defaultStepsReducer = 33
+    private var stepsReducer = 33
+    private weak var sensitivityLabelItem: NSMenuItem?
 
     /// Optimistic cache — updated instantly on scroll so the UI never waits for a read.
     private var cachedVolume = 50
@@ -157,33 +182,63 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var observedDeviceID: AudioDeviceID = 0
 
     @objc private func stepsReducerChanged(_ sender: NSSlider) {
-        stepsReducer = Int(sender.doubleValue.rounded())
-        leftMenuReducerItem?.title = "Trackpad Step Reducer: \(stepsReducer)"
+        let index = max(0, min(sensitivityValues.count - 1, sender.integerValue - 1))
+        stepsReducer = sensitivityValues[index]
+        sensitivityLabelItem?.title = "Scroll Sensitivity"
+    }
+
+    @objc private func resetStepsReducer() {
+        stepsReducer = defaultStepsReducer
+        sensitivityLabelItem?.title = "Scroll Sensitivity"
+    }
+
+    private func sensitivityIndex(for value: Int) -> Int {
+        max(0, sensitivityValues.firstIndex(of: value) ?? 1)
+    }
+
+    @objc private func toggleMute() {
+        let muted = isMuted()
+        setMuted(!muted)
+        cachedVolume = getVolume()
+        barView.update(volume: cachedVolume)
     }
 
     private func showLeftMenu(with event: NSEvent) {
         let menu = NSMenu()
         let current = NSMenuItem(title: "Current Volume: \(cachedVolume)%",
-                                 action: nil, keyEquivalent: "")
-                                 
+                                 action: #selector(toggleMute), keyEquivalent: "")
+        current.target = self
         menu.addItem(current)
+        menu.addItem(.separator())
 
-        let reducerItem = NSMenuItem(title: "Trackpad Step Reducer: \(stepsReducer)",
-                                     action: nil, keyEquivalent: "")
-        reducerItem.isEnabled = true
-        menu.addItem(reducerItem)
-        leftMenuReducerItem = reducerItem
+        let sensitivityLabel = NSMenuItem(title: "Scroll Sensitivity",
+                                          action: nil,
+                                          keyEquivalent: "")
+        sensitivityLabel.isEnabled = false
+        menu.addItem(sensitivityLabel)
+        sensitivityLabelItem = sensitivityLabel
 
-        let slider = NSSlider(value: Double(stepsReducer),
-                      minValue: 0,
-                      maxValue: 100,
+        let slider = NSSlider(value: Double(sensitivityIndex(for: stepsReducer) + 1),
+                      minValue: 1,
+                      maxValue: 3,
                       target: self,
                       action: #selector(stepsReducerChanged(_:)))
-        slider.numberOfTickMarks = 11
-        slider.allowsTickMarkValuesOnly = false
+        slider.isEnabled = true
+        slider.isContinuous = true
+        slider.controlSize = .regular
+        slider.numberOfTickMarks = sensitivityValues.count
+        slider.allowsTickMarkValuesOnly = true
+        slider.integerValue = sensitivityIndex(for: stepsReducer) + 1
 
-        let sliderContainer = NSView(frame: NSRect(x: 0, y: 0, width: 196, height: 24))
-        slider.frame = NSRect(x: 16, y: 0, width: 170, height: 24)
+        let sliderContainer = NSView(frame: NSRect(x: 0, y: 0, width: 196, height: 42))
+
+        let hint = NSTextField(labelWithString: "Drag to adjust")
+        hint.font = .systemFont(ofSize: 10, weight: .medium)
+        hint.textColor = .secondaryLabelColor
+        hint.frame = NSRect(x: 16, y: 24, width: 164, height: 12)
+        sliderContainer.addSubview(hint)
+
+        slider.frame = NSRect(x: 16, y: 4, width: 170, height: 24)
         sliderContainer.addSubview(slider)
 
         let sliderItem = NSMenuItem()
@@ -196,16 +251,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                               action: #selector(self.quit), keyEquivalent: "")
         quit.target = self
         menu.addItem(quit)
-        NSMenu.popUpContextMenu(menu, with: event, for: self.barView)
-    }
-
-    private func showMenu(with event: NSEvent) {
-        let menu = NSMenu()
-        let quit = NSMenuItem(title: "Quit VolumeScroll",
-                              action: #selector(self.quit), keyEquivalent: "")
-        quit.target = self
-        menu.addItem(quit)
-        NSMenu.popUpContextMenu(menu, with: event, for: self.barView)
+        statusItem.popUpMenu(menu)
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -233,10 +279,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         barView.onLeftClick = { [weak self] event in
             self?.showLeftMenu(with: event)
-        }
-
-        barView.onRightClick = { [weak self] event in
-            self?.showMenu(with: event)
         }
 
         barView.onResize = { [weak self] w in
